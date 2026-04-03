@@ -12,7 +12,7 @@ use defmt::{info, warn, unwrap};
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::interrupt::Priority;
-use embassy_nrf::{bind_interrupts, peripherals};
+use embassy_nrf::peripherals;
 use embassy_time::Timer;
 
 use nrf_softdevice::ble::advertisement_builder::{
@@ -22,7 +22,12 @@ use nrf_softdevice::ble::advertisement_builder::{
 use nrf_softdevice::ble::{gatt_server, peripheral};
 use nrf_softdevice::{raw, Softdevice};
 
-use boxing_bag_protocol::{SENSOR_NAMES, SERVICE_UUID};
+mod bitbang_i2c;
+mod lsm6ds3;
+
+use embassy_time::Duration;
+
+use boxing_bag_protocol::{AccelPacket, AccelSample, SAMPLES_PER_PACKET, SENSOR_NAMES, SERVICE_UUID};
 
 use defmt_rtt as _;
 
@@ -49,9 +54,116 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 const SENSOR_ID: u8 = 0;
 
-bind_interrupts!(struct Irqs {
-    TWISPI0 => embassy_nrf::twim::InterruptHandler<peripherals::TWISPI0>;
-});
+/// Bit-bang I2C scan — bypasses TWIM entirely, uses raw GPIO.
+/// Scans all 7-bit addresses (0x08-0x77) and returns the first that ACKs.
+/// Returns Some(addr) if found, None if no device responds.
+fn bitbang_i2c_scan() -> Option<u8> {
+    unsafe {
+        let p0_pin_cnf = 0x5000_0700 as *mut u32;
+        let p0_outset = 0x5000_0508 as *mut u32;
+        let p0_outclr = 0x5000_050C as *mut u32;
+        let p0_in = 0x5000_0510 as *const u32;
+        let p0_dirset = 0x5000_0518 as *mut u32;
+
+        const SCL: u32 = 27; // P0.27
+        const SDA: u32 = 7;  // P0.07
+        const SCL_BIT: u32 = 1 << SCL;
+        const SDA_BIT: u32 = 1 << SDA;
+
+        // Configure both as open-drain with pull-up:
+        // DIR=1(output), INPUT=0(connect), PULL=3(pullup), DRIVE=6(S0D1)
+        let cnf = 1 | (0 << 1) | (3 << 2) | (6 << 8);
+        p0_pin_cnf.add(SCL as usize).write_volatile(cnf);
+        p0_pin_cnf.add(SDA as usize).write_volatile(cnf);
+
+        // Start with both high (idle)
+        p0_outset.write_volatile(SCL_BIT | SDA_BIT);
+        cortex_m::asm::delay(5000);
+
+        let delay = || cortex_m::asm::delay(320); // ~5µs at 64MHz → ~100kHz
+
+        let sda_high = || { p0_outset.write_volatile(SDA_BIT); };
+        let sda_low = || { p0_outclr.write_volatile(SDA_BIT); };
+        let scl_high = || { p0_outset.write_volatile(SCL_BIT); };
+        let scl_low = || { p0_outclr.write_volatile(SCL_BIT); };
+        let read_sda = || -> bool { (p0_in.read_volatile() & SDA_BIT) != 0 };
+
+        let i2c_start = || {
+            sda_high(); delay();
+            scl_high(); delay();
+            sda_low();  delay(); // SDA falls while SCL high = START
+            scl_low();  delay();
+        };
+
+        let i2c_stop = || {
+            sda_low();  delay();
+            scl_high(); delay();
+            sda_high(); delay(); // SDA rises while SCL high = STOP
+        };
+
+        // Send 8 bits, return ACK (true = ACK received)
+        let i2c_write_byte = |byte: u8| -> bool {
+            for bit in (0..8).rev() {
+                if (byte >> bit) & 1 == 1 {
+                    sda_high();
+                } else {
+                    sda_low();
+                }
+                delay();
+                scl_high(); delay();
+                scl_low();  delay();
+            }
+            // Release SDA for ACK
+            sda_high(); delay();
+            scl_high(); delay();
+            let ack = !read_sda(); // ACK = SDA pulled low by slave
+            scl_low();  delay();
+            ack
+        };
+
+        // Check SDA/SCL lines are high (idle)
+        let scl_ok = (p0_in.read_volatile() & SCL_BIT) != 0;
+        let sda_ok = (p0_in.read_volatile() & SDA_BIT) != 0;
+        defmt::info!("I2C bus state: SCL={} SDA={}", scl_ok as u8, sda_ok as u8);
+
+        if !scl_ok || !sda_ok {
+            defmt::warn!("I2C bus stuck! SCL={} SDA={}", scl_ok as u8, sda_ok as u8);
+            // Try to recover by clocking SCL
+            for _ in 0..18 {
+                scl_low(); delay(); delay();
+                scl_high(); delay(); delay();
+            }
+            i2c_stop();
+        }
+
+        // Scan addresses 0x08 to 0x77
+        let mut found = None;
+        for addr in 0x08u8..=0x77 {
+            i2c_start();
+            let ack = i2c_write_byte((addr << 1) | 0); // write mode
+            i2c_stop();
+
+            if ack {
+                defmt::info!("I2C device found at address {:#04x}", addr);
+                if found.is_none() {
+                    found = Some(addr);
+                }
+            }
+        }
+
+        if found.is_none() {
+            defmt::warn!("I2C scan: no devices found");
+        }
+
+        // Reset pins to input (let TWIM reconfigure)
+        p0_pin_cnf.add(SCL as usize).write_volatile(0);
+        p0_pin_cnf.add(SDA as usize).write_volatile(0);
+
+        found
+    }
+}
+
+// No TWIM interrupt needed — using bitbang I2C for the IMU
 
 #[nrf_softdevice::gatt_service(uuid = "b0b0ba90-0001-4000-8000-000000000000")]
 struct AccelService {
@@ -98,11 +210,38 @@ async fn main(spawner: Spawner) {
 
     // Step 1: Red = booted
     leds.set(true, false, false);
-    Timer::after_millis(300).await;
+    Timer::after_millis(1000).await;
+
+    // ── Initialize IMU (before SoftDevice) ───────────────────────────
+    // Power on IMU
+    let _imu_pwr = Output::new(p.P1_08, Level::High, OutputDrive::Standard);
+    Timer::after_millis(50).await;
+
+    // Yellow = initializing IMU via bitbang I2C
+    leds.set(true, true, false);
+    Timer::after_millis(1000).await;
+
+    let mut imu_ok = false;
+    let i2c = bitbang_i2c::BitbangI2c::new(27, 7); // SCL=P0.27, SDA=P0.07
+    let mut imu = lsm6ds3::Lsm6ds3::new(i2c);
+
+    info!("Initializing IMU (bitbang I2C)...");
+    match imu.init() {
+        Ok(()) => {
+            info!("IMU initialized successfully");
+            imu_ok = true;
+            leds.set(false, true, false); // green = IMU OK
+        }
+        Err(e) => {
+            warn!("IMU init failed: {}", e);
+            leds.set(true, false, false); // red = IMU failed
+        }
+    }
+    Timer::after_millis(1000).await;
 
     // Step 2: Purple = about to enable SoftDevice
     leds.set(true, false, true);
-    Timer::after_millis(300).await;
+    Timer::after_millis(1000).await;
 
     info!("Enabling SoftDevice...");
     let sd = Softdevice::enable(&nrf_softdevice::Config {
@@ -141,15 +280,13 @@ async fn main(spawner: Spawner) {
 
     // Step 3: Cyan = SoftDevice enabled OK
     leds.set(false, true, true);
-    Timer::after_millis(300).await;
+    Timer::after_millis(1000).await;
 
     info!("Creating GATT server...");
     let server = unwrap!(Server::new(sd));
     unwrap!(spawner.spawn(softdevice_task(sd)));
 
-    // Step 4: Green = GATT server created
-    leds.set(false, true, false);
-    Timer::after_millis(300).await;
+    // Bitbang I2C doesn't use interrupts — works fine with SoftDevice.
 
     info!("Starting BLE advertising...");
 
@@ -184,8 +321,66 @@ async fn main(spawner: Spawner) {
         leds.set(false, true, false);
         info!("BLE connected!");
 
-        let r = gatt_server::run(&conn, &server, |_| {}).await;
-        info!("GATT server exited: {:?}", r);
+        if imu_ok {
+            let gatt_fut = gatt_server::run(&conn, &server, |_| {});
+            let stream_fut = stream_accel_data(&server, &conn, &mut imu);
+
+            futures::pin_mut!(gatt_fut);
+            futures::pin_mut!(stream_fut);
+
+            match futures::future::select(gatt_fut, stream_fut).await {
+                futures::future::Either::Left((r, _)) => {
+                    info!("GATT server exited: {:?}", r);
+                }
+                futures::future::Either::Right(((), _)) => {
+                    info!("Streaming exited");
+                }
+            }
+        } else {
+            let r = gatt_server::run(&conn, &server, |_| {}).await;
+            info!("GATT server exited: {:?}", r);
+        }
+
         info!("BLE disconnected, re-advertising...");
+    }
+}
+
+// ── Accelerometer streaming ────────────────────────────────────────────
+async fn stream_accel_data(
+    server: &Server,
+    conn: &nrf_softdevice::ble::Connection,
+    imu: &mut lsm6ds3::Lsm6ds3,
+) {
+    let mut seq: u8 = 0;
+    let mut sample_buf = [AccelSample { x: 0, y: 0, z: 0 }; SAMPLES_PER_PACKET];
+    let mut sample_idx = 0;
+
+    let mut ticker = embassy_time::Ticker::every(Duration::from_hz(104));
+
+    loop {
+        ticker.next().await;
+
+        // Blocking bitbang read — fast enough at 100kHz (~60µs for 6 bytes)
+        let sample = match imu.read_accel() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        sample_buf[sample_idx] = sample;
+        sample_idx += 1;
+
+        if sample_idx >= SAMPLES_PER_PACKET {
+            sample_idx = 0;
+
+            let packet = AccelPacket {
+                sensor_id: SENSOR_ID,
+                sequence: seq,
+                samples: sample_buf,
+            };
+            seq = seq.wrapping_add(1);
+
+            let encoded = packet.encode();
+            let _ = server.accel.accel_data_notify(conn, &encoded);
+        }
     }
 }

@@ -38,6 +38,18 @@ defmt-rtt = "1"
 futures = { version = "0.3", default-features = false, features = ["async-await"] }
 static_cell = "2"
 
+[[bin]]
+name = "boxing-bag-firmware"
+path = "src/main.rs"
+
+[[bin]]
+name = "ble-fake"
+path = "src/bin/ble_fake.rs"
+
+[[bin]]
+name = "i2c-test"
+path = "src/bin/i2c_test.rs"
+
 [profile.release]
 debug = 2       # keep debug info for probe-rs
 lto = true

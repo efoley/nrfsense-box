@@ -22,7 +22,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/target/thumbv7em-none-eabihf/release"
-FIRMWARE_NAME="boxing-bag-firmware"
+FIRMWARE_NAME="${FIRMWARE_BIN:-boxing-bag-firmware}"
 UF2_FAMILY="0xADA52840"
 APP_START_ADDR="0x27000"
 
@@ -60,13 +60,13 @@ else
 fi
 
 # ── Build ──────────────────────────────────────────────────────────
-echo "==> Building firmware (release)..."
+echo "==> Building firmware: $FIRMWARE_NAME (release)..."
 cd "$SCRIPT_DIR"
-cargo build --release
+cargo build --release --bin "$FIRMWARE_NAME"
 
 # ── Convert ELF → Intel HEX ───────────────────────────────────────
 echo "==> Converting ELF → HEX..."
-cargo objcopy --release -- -O ihex "$BUILD_DIR/$FIRMWARE_NAME.hex"
+cargo objcopy --release --bin "$FIRMWARE_NAME" -- -O ihex "$BUILD_DIR/$FIRMWARE_NAME.hex"
 
 # ── Convert HEX → UF2 ─────────────────────────────────────────────
 echo "==> Converting HEX → UF2..."
