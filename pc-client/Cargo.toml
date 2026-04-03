@@ -1,0 +1,27 @@
+[package]
+name = "boxing-bag-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# BLE central
+btleplug = "0.11"
+uuid = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# CSV logging
+csv = "1"
+chrono = "0.4"
+
+# Shared protocol
+boxing-bag-protocol = { path = "../protocol" }
+
+# Error handling
+anyhow = "1"

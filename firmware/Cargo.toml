@@ -1,0 +1,47 @@
+[package]
+name = "boxing-bag-firmware"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Embassy async runtime
+embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-time = { version = "0.4", features = ["defmt"] }
+embassy-nrf = { version = "0.3", features = ["nrf52840", "time-driver-rtc1", "gpiote", "defmt"] }
+embassy-sync = "0.6"
+
+# BLE via Nordic SoftDevice S140
+# Must use git master — crates.io 0.1.0 depends on nrf52840-pac which conflicts
+# with embassy-nrf's nrf-pac (__INTERRUPTS linker duplicate). Fixed in commit 7e017eb.
+nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice.git", rev = "5949a5b", features = [
+    "ble-peripheral",
+    "ble-gatt-server",
+    "s140",
+    "nrf52840",
+    "defmt",
+    "critical-section-impl",
+] }
+nrf-softdevice-s140 = { git = "https://github.com/embassy-rs/nrf-softdevice.git", rev = "5949a5b" }
+
+# USB serial
+embassy-usb = "0.4"
+
+# Cortex-M support
+cortex-m = "0.7"
+cortex-m-rt = "0.7"
+
+# Shared protocol
+boxing-bag-protocol = { path = "../protocol" }
+
+# Logging
+defmt = "1"
+defmt-rtt = "1"
+
+# Async
+futures = { version = "0.3", default-features = false, features = ["async-await"] }
+static_cell = "2"
+
+[profile.release]
+debug = 2       # keep debug info for probe-rs
+lto = true
+opt-level = "s"

@@ -1,0 +1,13 @@
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# UF2 flashing (default — no debug probe needed):
+#   Use ./flash_uf2.sh instead of `cargo run`
+#
+# SWD flashing (if you have a debug probe):
+#   Uncomment the line below and use `cargo run --release`
+# runner = "probe-rs run --chip nRF52840_xxAA"
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+[env]
+DEFMT_LOG = "info"
