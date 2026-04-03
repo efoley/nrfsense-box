@@ -23,9 +23,6 @@ nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice.git", rev
 ] }
 nrf-softdevice-s140 = { git = "https://github.com/embassy-rs/nrf-softdevice.git", rev = "5949a5b" }
 
-# USB serial
-embassy-usb = "0.4"
-
 # Cortex-M support
 cortex-m = "0.7"
 cortex-m-rt = "0.7"

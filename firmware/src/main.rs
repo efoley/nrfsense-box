@@ -1,6 +1,7 @@
-//! Minimal BLE test firmware with USB serial debug output.
+//! Boxing Bag Sensor Firmware — BLE advertising
 //!
 //! LED: red=boot, purple=SD init, cyan=SD ok, blue=advertising, green=connected
+//! White blink = panic
 
 #![no_std]
 #![no_main]
@@ -11,13 +12,8 @@ use defmt::{info, warn, unwrap};
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::interrupt::Priority;
-use embassy_nrf::usb::vbus_detect::SoftwareVbusDetect;
-use embassy_nrf::usb::Driver as UsbDriver;
 use embassy_nrf::{bind_interrupts, peripherals};
 use embassy_time::Timer;
-use embassy_usb::class::cdc_acm::{CdcAcmClass, State as CdcState};
-use embassy_usb::UsbDevice;
-use static_cell::StaticCell;
 
 use nrf_softdevice::ble::advertisement_builder::{
     AdvertisementDataType, Flag, LegacyAdvertisementBuilder, LegacyAdvertisementPayload,
@@ -53,10 +49,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 const SENSOR_ID: u8 = 0;
 
-type UsbD = UsbDriver<'static, peripherals::USBD, &'static SoftwareVbusDetect>;
-
 bind_interrupts!(struct Irqs {
-    USBD => embassy_nrf::usb::InterruptHandler<peripherals::USBD>;
     TWISPI0 => embassy_nrf::twim::InterruptHandler<peripherals::TWISPI0>;
 });
 
@@ -74,28 +67,6 @@ struct Server {
 #[embassy_executor::task]
 async fn softdevice_task(sd: &'static Softdevice) -> ! {
     sd.run().await
-}
-
-#[embassy_executor::task]
-async fn usb_task(mut usb: UsbDevice<'static, UsbD>) {
-    usb.run().await;
-}
-
-/// Writes messages over USB serial. Blocks on write but that's fine for debug.
-#[embassy_executor::task]
-async fn usb_serial_task(mut class: CdcAcmClass<'static, UsbD>) {
-    loop {
-        class.wait_connection().await;
-        let _ = class.write_packet(b"=== BoxingBagSensor USB serial ready ===\r\n").await;
-        // Keep reading (and discarding) to keep connection alive
-        let mut buf = [0u8; 64];
-        loop {
-            match class.read_packet(&mut buf).await {
-                Ok(_) => {}
-                Err(_) => break, // disconnected
-            }
-        }
-    }
 }
 
 struct Leds<'d> {
@@ -127,46 +98,11 @@ async fn main(spawner: Spawner) {
 
     // Step 1: Red = booted
     leds.set(true, false, false);
-
-    // ── Set up USB CDC serial ──────────────────────────────────────
-    static VBUS_DETECT: StaticCell<SoftwareVbusDetect> = StaticCell::new();
-    let vbus_detect: &'static SoftwareVbusDetect = VBUS_DETECT.init(SoftwareVbusDetect::new(true, false));
-    let usb_driver = UsbDriver::new(p.USBD, Irqs, &*vbus_detect);
-
-    static CONFIG_DESC_BUF: StaticCell<[u8; 256]> = StaticCell::new();
-    static BOS_DESC_BUF: StaticCell<[u8; 256]> = StaticCell::new();
-    static MSOS_DESC_BUF: StaticCell<[u8; 256]> = StaticCell::new();
-    static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
-
-    let mut usb_config = embassy_usb::Config::new(0x2886, 0x8045);
-    usb_config.manufacturer = Some("NRFSense");
-    usb_config.product = Some("BoxingBagSensor");
-    usb_config.serial_number = Some("001");
-
-    static CDC_STATE: StaticCell<CdcState> = StaticCell::new();
-    let cdc_state = CDC_STATE.init(CdcState::new());
-
-    let mut builder = embassy_usb::Builder::new(
-        usb_driver,
-        usb_config,
-        CONFIG_DESC_BUF.init([0; 256]),
-        BOS_DESC_BUF.init([0; 256]),
-        MSOS_DESC_BUF.init([0; 256]),
-        CONTROL_BUF.init([0; 64]),
-    );
-
-    let class = CdcAcmClass::new(&mut builder, cdc_state, 64);
-
-    let usb = builder.build();
-    unwrap!(spawner.spawn(usb_task(usb)));
-    unwrap!(spawner.spawn(usb_serial_task(class)));
-
-    // Give USB a moment to enumerate
-    Timer::after_millis(1000).await;
+    Timer::after_millis(300).await;
 
     // Step 2: Purple = about to enable SoftDevice
     leds.set(true, false, true);
-    Timer::after_millis(500).await;
+    Timer::after_millis(300).await;
 
     info!("Enabling SoftDevice...");
     let sd = Softdevice::enable(&nrf_softdevice::Config {
@@ -205,7 +141,7 @@ async fn main(spawner: Spawner) {
 
     // Step 3: Cyan = SoftDevice enabled OK
     leds.set(false, true, true);
-    Timer::after_millis(500).await;
+    Timer::after_millis(300).await;
 
     info!("Creating GATT server...");
     let server = unwrap!(Server::new(sd));
@@ -213,7 +149,7 @@ async fn main(spawner: Spawner) {
 
     // Step 4: Green = GATT server created
     leds.set(false, true, false);
-    Timer::after_millis(500).await;
+    Timer::after_millis(300).await;
 
     info!("Starting BLE advertising...");
 
