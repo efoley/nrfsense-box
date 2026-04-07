@@ -7,7 +7,7 @@ edition = "2021"
 # Embassy async runtime
 embassy-executor = { version = "0.7", features = ["arch-cortex-m", "executor-thread", "defmt"] }
 embassy-time = { version = "0.4", features = ["defmt"] }
-embassy-nrf = { version = "0.3", features = ["nrf52840", "time-driver-rtc1", "gpiote", "defmt"] }
+embassy-nrf = { version = "0.3", features = ["nrf52840", "time-driver-rtc1", "gpiote", "defmt", "unstable-pac"] }
 embassy-sync = "0.6"
 
 # BLE via Nordic SoftDevice S140
@@ -23,9 +23,14 @@ nrf-softdevice = { git = "https://github.com/embassy-rs/nrf-softdevice.git", rev
 ] }
 nrf-softdevice-s140 = { git = "https://github.com/embassy-rs/nrf-softdevice.git", rev = "5949a5b" }
 
+# USB serial
+embassy-usb = "0.4"
+heapless = "0.8"
+
 # Cortex-M support
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
+
 
 # Shared protocol
 boxing-bag-protocol = { path = "../protocol" }
