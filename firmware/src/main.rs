@@ -34,7 +34,7 @@ use nrf_softdevice::ble::advertisement_builder::{
 use nrf_softdevice::ble::{gatt_server, peripheral, Connection};
 use nrf_softdevice::{raw, Softdevice};
 
-use boxing_bag_protocol::{AccelPacket, AccelSample, SAMPLES_PER_PACKET, SENSOR_NAMES, SERVICE_UUID};
+use boxing_bag_protocol::{ImuPacket, ImuSample, PACKET_SIZE, SAMPLES_PER_PACKET, SENSOR_NAMES, SERVICE_UUID};
 
 use defmt_rtt as _;
 
@@ -66,14 +66,14 @@ bind_interrupts!(struct Irqs {
 });
 
 #[nrf_softdevice::gatt_service(uuid = "b0b0ba90-0001-4000-8000-000000000000")]
-struct AccelService {
+struct ImuService {
     #[characteristic(uuid = "b0b0ba90-0002-4000-8000-000000000000", notify)]
-    accel_data: [u8; 20],
+    imu_data: [u8; 20],
 }
 
 #[nrf_softdevice::gatt_server]
 struct Server {
-    accel: AccelService,
+    imu: ImuService,
 }
 
 #[embassy_executor::task]
@@ -172,9 +172,9 @@ async fn main(spawner: Spawner) {
     twim_config.sda_pullup = true;
     twim_config.scl_pullup = true;
     let twim = Twim::new(p.TWISPI0, Irqs, p.P0_07, p.P0_27, twim_config);
-    let mut imu = lsm6ds3::Lsm6ds3::new(twim);
+    let mut imu_driver = lsm6ds3::Lsm6ds3::new(twim);
 
-    let imu_ok = match imu.init().await {
+    let imu_ok = match imu_driver.init().await {
         Ok(()) => {
             info!("IMU initialized");
             true
@@ -221,7 +221,7 @@ async fn main(spawner: Spawner) {
 
         if imu_ok {
             let gatt_fut = gatt_server::run(&conn, &server, |_| {});
-            let stream_fut = stream_accel_data(&server, &conn, &mut imu);
+            let stream_fut = stream_imu_data(&server, &conn, &mut imu_driver);
             futures::pin_mut!(gatt_fut);
             futures::pin_mut!(stream_fut);
             let _ = futures::future::select(gatt_fut, stream_fut).await;
@@ -234,13 +234,13 @@ async fn main(spawner: Spawner) {
 }
 
 // ── Accelerometer streaming ────────────────────────────────────────────
-async fn stream_accel_data<T: twim::Instance>(
+async fn stream_imu_data<T: twim::Instance>(
     server: &Server,
     conn: &Connection,
     imu: &mut lsm6ds3::Lsm6ds3<'_, T>,
 ) {
     let mut seq: u8 = 0;
-    let mut sample_buf = [AccelSample { x: 0, y: 0, z: 0 }; SAMPLES_PER_PACKET];
+    let mut sample_buf = [ImuSample::ZERO; SAMPLES_PER_PACKET];
     let mut sample_idx = 0;
     let mut last_packet_time: Option<embassy_time::Instant> = None;
     let mut packet_start_time = embassy_time::Instant::now();
@@ -250,7 +250,7 @@ async fn stream_accel_data<T: twim::Instance>(
     loop {
         ticker.next().await;
 
-        let sample = match imu.read_accel().await {
+        let sample = match imu.read_imu().await {
             Ok(s) => s,
             Err(e) => {
                 warn!("IMU read error: {:?}", e);
@@ -258,7 +258,6 @@ async fn stream_accel_data<T: twim::Instance>(
             }
         };
 
-        // Capture time when we read the first sample of a new packet
         if sample_idx == 0 {
             packet_start_time = embassy_time::Instant::now();
         }
@@ -278,7 +277,7 @@ async fn stream_accel_data<T: twim::Instance>(
             };
             last_packet_time = Some(packet_start_time);
 
-            let packet = AccelPacket {
+            let packet = ImuPacket {
                 sensor_id: SENSOR_ID,
                 sequence: seq,
                 time_delta_ms: delta_ms,
@@ -287,7 +286,10 @@ async fn stream_accel_data<T: twim::Instance>(
             seq = seq.wrapping_add(1);
 
             let encoded = packet.encode();
-            let _ = server.accel.accel_data_notify(conn, &encoded);
+            // Pad to 20 bytes to match GATT characteristic declaration
+            let mut padded = [0u8; 20];
+            padded[..encoded.len()].copy_from_slice(&encoded);
+            let _ = server.imu.imu_data_notify(conn, &padded);
         }
     }
 }

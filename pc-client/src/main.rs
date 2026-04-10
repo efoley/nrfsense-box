@@ -32,17 +32,17 @@ use ratatui::widgets::*;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use boxing_bag_protocol::{AccelPacket, AccelSample, PACKET_SIZE, SAMPLES_PER_PACKET, SENSOR_NAMES};
+use boxing_bag_protocol::{ImuPacket, ImuSample, PACKET_SIZE, SAMPLES_PER_PACKET, SENSOR_NAMES};
 
 // ── BLE UUIDs ──────────────────────────────────────────────────────────
 const SERVICE_UUID: Uuid = Uuid::from_u128(0xb0b0ba90_0001_4000_8000_000000000000);
-const ACCEL_CHAR_UUID: Uuid = Uuid::from_u128(0xb0b0ba90_0002_4000_8000_000000000000);
+const IMU_CHAR_UUID: Uuid = Uuid::from_u128(0xb0b0ba90_0002_4000_8000_000000000000);
 
 // ── Shared state ───────────────────────────────────────────────────────
 #[derive(Clone, Debug)]
 struct SensorState {
     name: String,
-    last_sample: AccelSample,
+    last_sample: ImuSample,
     last_g: (f32, f32, f32),
     peak_magnitude: f32,
     packets_received: u64,
@@ -50,7 +50,6 @@ struct SensorState {
     dropped_packets: u64,
     last_update: Instant,
     samples_per_sec: f32,
-    // Ring buffer for sparkline (last 60 magnitude readings)
     magnitude_history: Vec<f32>,
 }
 
@@ -58,7 +57,7 @@ impl SensorState {
     fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            last_sample: AccelSample { x: 0, y: 0, z: 0 },
+            last_sample: ImuSample::ZERO,
             last_g: (0.0, 0.0, 0.0),
             peak_magnitude: 0.0,
             packets_received: 0,
@@ -85,7 +84,9 @@ impl CsvLogger {
         let mut logger = Self { writer };
         logger
             .writer
-            .write_record(["timestamp", "device_ms", "sensor_id", "sensor_name", "seq", "x_raw", "y_raw", "z_raw", "x_g", "y_g", "z_g", "magnitude_g"])
+            .write_record(["timestamp", "device_ms", "sensor_id", "sensor_name", "seq",
+                "ax_raw", "ay_raw", "az_raw", "ax_g", "ay_g", "az_g", "accel_mag_g",
+                "gx_raw", "gy_raw", "gz_raw", "gx_dps", "gy_dps", "gz_dps"])
             .ok();
         logger.writer.flush().ok();
         Ok(logger)
@@ -93,9 +94,10 @@ impl CsvLogger {
 
     /// Log a sample with device-side timing.
     /// `device_time_ms` is the reconstructed absolute device time for this sample.
-    fn log_sample(&mut self, sensor_id: u8, seq: u8, sample: &AccelSample, device_time_ms: f64) {
-        let (gx, gy, gz) = sample.to_g();
-        let mag = (gx * gx + gy * gy + gz * gz).sqrt();
+    fn log_sample(&mut self, sensor_id: u8, seq: u8, sample: &ImuSample, device_time_ms: f64) {
+        let (ax, ay, az) = sample.accel_g();
+        let accel_mag = (ax * ax + ay * ay + az * az).sqrt();
+        let (gx, gy, gz) = sample.gyro_dps();
         let name = if (sensor_id as usize) < SENSOR_NAMES.len() {
             SENSOR_NAMES[sensor_id as usize]
         } else {
@@ -109,13 +111,19 @@ impl CsvLogger {
                 sensor_id.to_string(),
                 name.to_string(),
                 seq.to_string(),
-                sample.x.to_string(),
-                sample.y.to_string(),
-                sample.z.to_string(),
-                format!("{:.4}", gx),
-                format!("{:.4}", gy),
-                format!("{:.4}", gz),
-                format!("{:.4}", mag),
+                sample.ax.to_string(),
+                sample.ay.to_string(),
+                sample.az.to_string(),
+                format!("{:.4}", ax),
+                format!("{:.4}", ay),
+                format!("{:.4}", az),
+                format!("{:.4}", accel_mag),
+                sample.gx.to_string(),
+                sample.gy.to_string(),
+                sample.gz.to_string(),
+                format!("{:.2}", gx),
+                format!("{:.2}", gy),
+                format!("{:.2}", gz),
             ])
             .ok();
         self.writer.flush().ok();
@@ -155,32 +163,34 @@ async fn find_sensors(adapter: &Adapter, timeout_secs: u64) -> Result<Vec<Periph
 
 async fn connect_and_subscribe(
     peripheral: &Peripheral,
-    tx: mpsc::UnboundedSender<(u8, AccelPacket)>,
+    tx: mpsc::UnboundedSender<(u8, ImuPacket)>,
 ) -> Result<()> {
     peripheral.connect().await.context("BLE connect failed")?;
     peripheral.discover_services().await?;
 
-    // Find our characteristic
     let chars = peripheral.characteristics();
-    let accel_char = chars
+    let imu_char = chars
         .iter()
-        .find(|c| c.uuid == ACCEL_CHAR_UUID)
-        .context("Accel characteristic not found")?
+        .find(|c| c.uuid == IMU_CHAR_UUID)
+        .context("IMU characteristic not found")?
         .clone();
 
-    // Subscribe to notifications
-    peripheral.subscribe(&accel_char).await?;
+    peripheral.subscribe(&imu_char).await?;
 
-    // Spawn notification listener
     let mut notifs = peripheral.notifications().await?;
     let tx = tx.clone();
 
     tokio::spawn(async move {
+        let mut logged_size = false;
         while let Some(data) = notifs.next().await {
-            if data.value.len() == PACKET_SIZE {
+            if !logged_size {
+                eprintln!("  First notification: {} bytes (expected {})", data.value.len(), PACKET_SIZE);
+                logged_size = true;
+            }
+            if data.value.len() >= PACKET_SIZE {
                 let mut buf = [0u8; PACKET_SIZE];
-                buf.copy_from_slice(&data.value);
-                let packet = AccelPacket::decode(&buf);
+                buf.copy_from_slice(&data.value[..PACKET_SIZE]);
+                let packet = ImuPacket::decode(&buf);
                 let _ = tx.send((packet.sensor_id, packet));
             }
         }
@@ -257,7 +267,7 @@ fn draw_dashboard(frame: &mut Frame, state: &HashMap<u8, SensorState>) {
                     s.packets_received, s.dropped_packets, s.samples_per_sec
                 )),
                 Line::from(""),
-                Line::from(format!("  Raw: x={:+6} y={:+6} z={:+6}", s.last_sample.x, s.last_sample.y, s.last_sample.z)),
+                Line::from(format!("  Accel raw: x={:+6} y={:+6} z={:+6}", s.last_sample.ax, s.last_sample.ay, s.last_sample.az)),
             ];
             let stats = Paragraph::new(stats_text).block(block);
             frame.render_widget(stats, inner[0]);
@@ -314,7 +324,7 @@ async fn main() -> Result<()> {
     let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
 
     // BLE packet channel
-    let (tx, mut rx) = mpsc::unbounded_channel::<(u8, AccelPacket)>();
+    let (tx, mut rx) = mpsc::unbounded_channel::<(u8, ImuPacket)>();
 
     // Discover and connect to sensors
     let adapter = get_adapter().await?;
@@ -390,7 +400,7 @@ async fn main() -> Result<()> {
                 // Update last sample (use final sample in packet)
                 let last = packet.samples[SAMPLES_PER_PACKET - 1];
                 entry.last_sample = last;
-                entry.last_g = last.to_g();
+                entry.last_g = last.accel_g();
 
                 let (gx, gy, gz) = entry.last_g;
                 let mag = (gx * gx + gy * gy + gz * gz).sqrt();

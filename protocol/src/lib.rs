@@ -1,91 +1,97 @@
 #![no_std]
 
 // ── BLE UUIDs ──────────────────────────────────────────────────────────
-// Custom 128-bit UUIDs for the boxing bag sensor service
 pub const SERVICE_UUID: [u8; 16] = hex_uuid("b0b0ba90-0001-4000-8000-000000000000");
-pub const ACCEL_CHAR_UUID: [u8; 16] = hex_uuid("b0b0ba90-0002-4000-8000-000000000000");
+pub const IMU_CHAR_UUID: [u8; 16] = hex_uuid("b0b0ba90-0002-4000-8000-000000000000");
 
-// String versions for PC-side BLE libraries
 pub const SERVICE_UUID_STR: &str = "b0b0ba90-0001-4000-8000-000000000000";
-pub const ACCEL_CHAR_UUID_STR: &str = "b0b0ba90-0002-4000-8000-000000000000";
+pub const IMU_CHAR_UUID_STR: &str = "b0b0ba90-0002-4000-8000-000000000000";
 
 // ── Packet format ──────────────────────────────────────────────────────
-// Each BLE notification carries (20 bytes total, ATT MTU 23 - 3 overhead):
+// Each BLE notification carries (38 bytes, requires ATT MTU ≥ 41):
 //
 //   byte 0:        sequence (u8, wrapping)
 //   byte 1:        bits[7:6] = sensor_id (0-3)
 //                  bits[5:0] = time_delta_ms (0-63, saturating)
-//   bytes 2-19:    3 × AccelSample (6 bytes each, x/y/z as i16 little-endian)
+//   bytes 2-37:    3 × ImuSample (12 bytes each):
+//                    accel x/y/z as i16 LE (6 bytes)
+//                    gyro  x/y/z as i16 LE (6 bytes)
 //
-// time_delta_ms is the milliseconds elapsed between when sample[0] of this
-// packet was read and when sample[0] of the previous packet was read. The
-// PC client accumulates these to reconstruct an absolute device timeline.
-// Saturation at 63 ms loses precision only on dropped/delayed packets > 63 ms;
-// at 104 Hz with 3 samples/packet, normal inter-packet time is ~28.8 ms.
+// time_delta_ms is ms elapsed between sample[0] of this packet and
+// sample[0] of the previous packet. PC client accumulates deltas.
 //
-// At 104 Hz sample rate with 3 samples/packet → ~35 notifications/sec.
+// At 104 Hz with 3 samples/packet → ~35 notifications/sec.
 
-pub const SAMPLES_PER_PACKET: usize = 3;
-pub const PACKET_SIZE: usize = 2 + SAMPLES_PER_PACKET * 6;
+pub const SAMPLES_PER_PACKET: usize = 1;
+pub const SAMPLE_SIZE: usize = 12; // 6 accel + 6 gyro
+pub const PACKET_SIZE: usize = 2 + SAMPLES_PER_PACKET * SAMPLE_SIZE; // 14
 pub const MAX_TIME_DELTA_MS: u8 = 63;
-/// Nominal inter-sample period in milliseconds (1000ms ÷ 104Hz ≈ 9.615 ms).
-pub const SAMPLE_PERIOD_MS_X1000: u32 = 1_000_000 / 104; // 9615
+
+/// Accelerometer scale: ±4g → 0.122 mg/LSB
+pub const ACCEL_SCALE: f32 = 0.000122;
+/// Gyroscope scale: ±250 dps → 8.75 mdps/LSB
+pub const GYRO_SCALE: f32 = 0.00875;
 
 #[derive(Clone, Copy, Debug)]
-pub struct AccelSample {
-    pub x: i16,
-    pub y: i16,
-    pub z: i16,
+pub struct ImuSample {
+    /// Accelerometer raw readings (LSM6DS3 units)
+    pub ax: i16,
+    pub ay: i16,
+    pub az: i16,
+    /// Gyroscope raw readings (LSM6DS3 units)
+    pub gx: i16,
+    pub gy: i16,
+    pub gz: i16,
 }
 
-impl AccelSample {
-    /// Convert raw LSM6DS3 reading to g's.
-    /// Assumes ±4g range → sensitivity = 0.122 mg/LSB
-    pub fn to_g(&self) -> (f32, f32, f32) {
-        const SCALE: f32 = 0.000122;
+impl ImuSample {
+    pub const ZERO: Self = Self { ax: 0, ay: 0, az: 0, gx: 0, gy: 0, gz: 0 };
+
+    /// Convert accel to g's. Assumes ±4g range.
+    pub fn accel_g(&self) -> (f32, f32, f32) {
         (
-            self.x as f32 * SCALE,
-            self.y as f32 * SCALE,
-            self.z as f32 * SCALE,
+            self.ax as f32 * ACCEL_SCALE,
+            self.ay as f32 * ACCEL_SCALE,
+            self.az as f32 * ACCEL_SCALE,
         )
     }
 
-    pub fn magnitude_g(&self) -> f32 {
-        let (x, y, z) = self.to_g();
-        // sqrt not available in no_std without libm, so return squared magnitude
+    /// Convert gyro to degrees per second. Assumes ±250 dps range.
+    pub fn gyro_dps(&self) -> (f32, f32, f32) {
+        (
+            self.gx as f32 * GYRO_SCALE,
+            self.gy as f32 * GYRO_SCALE,
+            self.gz as f32 * GYRO_SCALE,
+        )
+    }
+
+    pub fn accel_magnitude_sq(&self) -> f32 {
+        let (x, y, z) = self.accel_g();
         x * x + y * y + z * z
     }
 }
 
 #[derive(Clone, Copy)]
-pub struct AccelPacket {
-    /// Sensor identifier (0-3, only 2 bits transmitted)
+pub struct ImuPacket {
     pub sensor_id: u8,
-    /// Wrapping packet sequence number (0-255)
     pub sequence: u8,
-    /// Milliseconds since sample[0] of the previous packet (0-63, saturating)
     pub time_delta_ms: u8,
-    pub samples: [AccelSample; SAMPLES_PER_PACKET],
+    pub samples: [ImuSample; SAMPLES_PER_PACKET],
 }
 
-impl AccelPacket {
+impl ImuPacket {
     pub fn encode(&self) -> [u8; PACKET_SIZE] {
         let mut buf = [0u8; PACKET_SIZE];
         buf[0] = self.sequence;
-        // bits[7:6] = sensor_id (truncated to 2 bits)
-        // bits[5:0] = time_delta_ms (truncated to 6 bits)
         buf[1] = ((self.sensor_id & 0x03) << 6) | (self.time_delta_ms & 0x3F);
         for (i, s) in self.samples.iter().enumerate() {
-            let off = 2 + i * 6;
-            let x = s.x.to_le_bytes();
-            let y = s.y.to_le_bytes();
-            let z = s.z.to_le_bytes();
-            buf[off] = x[0];
-            buf[off + 1] = x[1];
-            buf[off + 2] = y[0];
-            buf[off + 3] = y[1];
-            buf[off + 4] = z[0];
-            buf[off + 5] = z[1];
+            let off = 2 + i * SAMPLE_SIZE;
+            buf[off..off + 2].copy_from_slice(&s.ax.to_le_bytes());
+            buf[off + 2..off + 4].copy_from_slice(&s.ay.to_le_bytes());
+            buf[off + 4..off + 6].copy_from_slice(&s.az.to_le_bytes());
+            buf[off + 6..off + 8].copy_from_slice(&s.gx.to_le_bytes());
+            buf[off + 8..off + 10].copy_from_slice(&s.gy.to_le_bytes());
+            buf[off + 10..off + 12].copy_from_slice(&s.gz.to_le_bytes());
         }
         buf
     }
@@ -94,14 +100,17 @@ impl AccelPacket {
         let sequence = buf[0];
         let sensor_id = (buf[1] >> 6) & 0x03;
         let time_delta_ms = buf[1] & 0x3F;
-        let mut samples = [AccelSample { x: 0, y: 0, z: 0 }; SAMPLES_PER_PACKET];
+        let mut samples = [ImuSample::ZERO; SAMPLES_PER_PACKET];
         for (i, s) in samples.iter_mut().enumerate() {
-            let off = 2 + i * 6;
-            s.x = i16::from_le_bytes([buf[off], buf[off + 1]]);
-            s.y = i16::from_le_bytes([buf[off + 2], buf[off + 3]]);
-            s.z = i16::from_le_bytes([buf[off + 4], buf[off + 5]]);
+            let off = 2 + i * SAMPLE_SIZE;
+            s.ax = i16::from_le_bytes([buf[off], buf[off + 1]]);
+            s.ay = i16::from_le_bytes([buf[off + 2], buf[off + 3]]);
+            s.az = i16::from_le_bytes([buf[off + 4], buf[off + 5]]);
+            s.gx = i16::from_le_bytes([buf[off + 6], buf[off + 7]]);
+            s.gy = i16::from_le_bytes([buf[off + 8], buf[off + 9]]);
+            s.gz = i16::from_le_bytes([buf[off + 10], buf[off + 11]]);
         }
-        AccelPacket {
+        ImuPacket {
             sensor_id,
             sequence,
             time_delta_ms,
@@ -114,11 +123,10 @@ impl AccelPacket {
 pub const SENSOR_NAMES: [&str; 3] = ["BAG_TOP", "BAG_MID", "BAG_BOT"];
 
 // ── Helper ─────────────────────────────────────────────────────────────
-/// Parse a UUID string like "b0b0ba90-0001-..." into 16 bytes (little-endian for BLE)
 const fn hex_uuid(s: &str) -> [u8; 16] {
     let b = s.as_bytes();
     let mut out = [0u8; 16];
-    let mut oi = 15; // BLE UUIDs are little-endian
+    let mut oi = 15;
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'-' {
