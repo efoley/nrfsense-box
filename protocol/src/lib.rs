@@ -10,14 +10,26 @@ pub const SERVICE_UUID_STR: &str = "b0b0ba90-0001-4000-8000-000000000000";
 pub const ACCEL_CHAR_UUID_STR: &str = "b0b0ba90-0002-4000-8000-000000000000";
 
 // ── Packet format ──────────────────────────────────────────────────────
-// Each BLE notification carries:
-//   [sensor_id: u8] [sequence: u8] [3 × AccelSample(x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)]
-// Total: 2 + 3×6 = 20 bytes — fits in default ATT MTU (23 - 3 = 20 payload)
+// Each BLE notification carries (20 bytes total, ATT MTU 23 - 3 overhead):
 //
-// At 104 Hz sample rate with 3 samples/packet → ~35 notifications/sec per sensor.
+//   byte 0:        sequence (u8, wrapping)
+//   byte 1:        bits[7:6] = sensor_id (0-3)
+//                  bits[5:0] = time_delta_ms (0-63, saturating)
+//   bytes 2-19:    3 × AccelSample (6 bytes each, x/y/z as i16 little-endian)
+//
+// time_delta_ms is the milliseconds elapsed between when sample[0] of this
+// packet was read and when sample[0] of the previous packet was read. The
+// PC client accumulates these to reconstruct an absolute device timeline.
+// Saturation at 63 ms loses precision only on dropped/delayed packets > 63 ms;
+// at 104 Hz with 3 samples/packet, normal inter-packet time is ~28.8 ms.
+//
+// At 104 Hz sample rate with 3 samples/packet → ~35 notifications/sec.
 
 pub const SAMPLES_PER_PACKET: usize = 3;
 pub const PACKET_SIZE: usize = 2 + SAMPLES_PER_PACKET * 6;
+pub const MAX_TIME_DELTA_MS: u8 = 63;
+/// Nominal inter-sample period in milliseconds (1000ms ÷ 104Hz ≈ 9.615 ms).
+pub const SAMPLE_PERIOD_MS_X1000: u32 = 1_000_000 / 104; // 9615
 
 #[derive(Clone, Copy, Debug)]
 pub struct AccelSample {
@@ -47,16 +59,22 @@ impl AccelSample {
 
 #[derive(Clone, Copy)]
 pub struct AccelPacket {
+    /// Sensor identifier (0-3, only 2 bits transmitted)
     pub sensor_id: u8,
+    /// Wrapping packet sequence number (0-255)
     pub sequence: u8,
+    /// Milliseconds since sample[0] of the previous packet (0-63, saturating)
+    pub time_delta_ms: u8,
     pub samples: [AccelSample; SAMPLES_PER_PACKET],
 }
 
 impl AccelPacket {
     pub fn encode(&self) -> [u8; PACKET_SIZE] {
         let mut buf = [0u8; PACKET_SIZE];
-        buf[0] = self.sensor_id;
-        buf[1] = self.sequence;
+        buf[0] = self.sequence;
+        // bits[7:6] = sensor_id (truncated to 2 bits)
+        // bits[5:0] = time_delta_ms (truncated to 6 bits)
+        buf[1] = ((self.sensor_id & 0x03) << 6) | (self.time_delta_ms & 0x3F);
         for (i, s) in self.samples.iter().enumerate() {
             let off = 2 + i * 6;
             let x = s.x.to_le_bytes();
@@ -73,8 +91,9 @@ impl AccelPacket {
     }
 
     pub fn decode(buf: &[u8; PACKET_SIZE]) -> Self {
-        let sensor_id = buf[0];
-        let sequence = buf[1];
+        let sequence = buf[0];
+        let sensor_id = (buf[1] >> 6) & 0x03;
+        let time_delta_ms = buf[1] & 0x3F;
         let mut samples = [AccelSample { x: 0, y: 0, z: 0 }; SAMPLES_PER_PACKET];
         for (i, s) in samples.iter_mut().enumerate() {
             let off = 2 + i * 6;
@@ -85,6 +104,7 @@ impl AccelPacket {
         AccelPacket {
             sensor_id,
             sequence,
+            time_delta_ms,
             samples,
         }
     }

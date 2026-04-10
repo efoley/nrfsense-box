@@ -85,13 +85,15 @@ impl CsvLogger {
         let mut logger = Self { writer };
         logger
             .writer
-            .write_record(["timestamp", "sensor_id", "sensor_name", "seq", "x_raw", "y_raw", "z_raw", "x_g", "y_g", "z_g", "magnitude_g"])
+            .write_record(["timestamp", "device_ms", "sensor_id", "sensor_name", "seq", "x_raw", "y_raw", "z_raw", "x_g", "y_g", "z_g", "magnitude_g"])
             .ok();
         logger.writer.flush().ok();
         Ok(logger)
     }
 
-    fn log_sample(&mut self, sensor_id: u8, seq: u8, sample: &AccelSample) {
+    /// Log a sample with device-side timing.
+    /// `device_time_ms` is the reconstructed absolute device time for this sample.
+    fn log_sample(&mut self, sensor_id: u8, seq: u8, sample: &AccelSample, device_time_ms: f64) {
         let (gx, gy, gz) = sample.to_g();
         let mag = (gx * gx + gy * gy + gz * gz).sqrt();
         let name = if (sensor_id as usize) < SENSOR_NAMES.len() {
@@ -103,6 +105,7 @@ impl CsvLogger {
         self.writer
             .write_record(&[
                 Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+                format!("{:.1}", device_time_ms),
                 sensor_id.to_string(),
                 name.to_string(),
                 seq.to_string(),
@@ -115,8 +118,6 @@ impl CsvLogger {
                 format!("{:.4}", mag),
             ])
             .ok();
-        // Flush periodically (every 100 writes or so) in production;
-        // for simplicity, flush every write here
         self.writer.flush().ok();
     }
 }
@@ -346,12 +347,21 @@ async fn main() -> Result<()> {
 
     tokio::spawn(async move {
         let mut rate_counters: HashMap<u8, (Instant, u64)> = HashMap::new();
+        // Per-sensor accumulated device time (ms) from delta encoding
+        let mut device_times: HashMap<u8, f64> = HashMap::new();
+        // Inter-sample period in ms (1000 / 104 Hz ≈ 9.615 ms)
+        let sample_period_ms = 1000.0 / 104.0; // ~9.615 ms between IMU samples
 
         while let Some((sensor_id, packet)) = rx.recv().await {
-            // Log each sample to CSV
+            // Accumulate device-side time from delta encoding
+            let device_ms = device_times.entry(sensor_id).or_insert(0.0);
+            *device_ms += packet.time_delta_ms as f64;
+
+            // Log each sample with interpolated device timestamp
             if let Ok(mut logger) = csv_clone.lock() {
-                for sample in &packet.samples {
-                    logger.log_sample(sensor_id, packet.sequence, sample);
+                for (i, sample) in packet.samples.iter().enumerate() {
+                    let sample_time = *device_ms + i as f64 * sample_period_ms;
+                    logger.log_sample(sensor_id, packet.sequence, sample, sample_time);
                 }
             }
 

@@ -242,6 +242,8 @@ async fn stream_accel_data<T: twim::Instance>(
     let mut seq: u8 = 0;
     let mut sample_buf = [AccelSample { x: 0, y: 0, z: 0 }; SAMPLES_PER_PACKET];
     let mut sample_idx = 0;
+    let mut last_packet_time: Option<embassy_time::Instant> = None;
+    let mut packet_start_time = embassy_time::Instant::now();
 
     let mut ticker = Ticker::every(Duration::from_hz(104));
 
@@ -256,15 +258,30 @@ async fn stream_accel_data<T: twim::Instance>(
             }
         };
 
+        // Capture time when we read the first sample of a new packet
+        if sample_idx == 0 {
+            packet_start_time = embassy_time::Instant::now();
+        }
+
         sample_buf[sample_idx] = sample;
         sample_idx += 1;
 
         if sample_idx >= SAMPLES_PER_PACKET {
             sample_idx = 0;
 
+            let delta_ms = match last_packet_time {
+                None => 0u8,
+                Some(prev) => {
+                    let d = (packet_start_time - prev).as_millis();
+                    if d > 63 { 63 } else { d as u8 }
+                }
+            };
+            last_packet_time = Some(packet_start_time);
+
             let packet = AccelPacket {
                 sensor_id: SENSOR_ID,
                 sequence: seq,
+                time_delta_ms: delta_ms,
                 samples: sample_buf,
             };
             seq = seq.wrapping_add(1);

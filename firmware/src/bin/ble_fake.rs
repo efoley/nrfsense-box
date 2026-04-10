@@ -152,12 +152,22 @@ async fn main(spawner: Spawner) {
 async fn fake_stream(server: &Server, conn: &nrf_softdevice::ble::Connection) {
     let mut seq: u8 = 0;
     let mut counter: i16 = 0;
+    let mut last_time: Option<embassy_time::Instant> = None;
     let mut ticker = Ticker::every(Duration::from_hz(104));
 
     loop {
         ticker.next().await;
 
-        // Fake samples: counter increments each sample
+        let now = embassy_time::Instant::now();
+        let delta_ms = match last_time {
+            None => 0u8,
+            Some(prev) => {
+                let d = (now - prev).as_millis();
+                if d > 63 { 63 } else { d as u8 }
+            }
+        };
+        last_time = Some(now);
+
         let samples = [
             AccelSample { x: counter, y: counter.wrapping_add(1), z: counter.wrapping_add(2) },
             AccelSample { x: counter.wrapping_add(3), y: counter.wrapping_add(4), z: counter.wrapping_add(5) },
@@ -168,6 +178,7 @@ async fn fake_stream(server: &Server, conn: &nrf_softdevice::ble::Connection) {
         let packet = AccelPacket {
             sensor_id: SENSOR_ID,
             sequence: seq,
+            time_delta_ms: delta_ms,
             samples,
         };
         seq = seq.wrapping_add(1);
