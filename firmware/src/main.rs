@@ -23,6 +23,7 @@ use defmt::{info, warn, unwrap};
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::interrupt::Priority;
+// use embassy_nrf::saadc::{self, ChannelConfig, Saadc}; // disabled: SAADC breaks BLE
 use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::{bind_interrupts, peripherals};
 use embassy_time::{Duration, Ticker, Timer};
@@ -63,6 +64,7 @@ const SENSOR_ID: u8 = 0;
 
 bind_interrupts!(struct Irqs {
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
+    // SAADC => saadc::InterruptHandler; // disabled: SAADC breaks BLE
 });
 
 #[nrf_softdevice::gatt_service(uuid = "b0b0ba90-0001-4000-8000-000000000000")]
@@ -80,6 +82,10 @@ struct Server {
 async fn softdevice_task(sd: &'static Softdevice) -> ! {
     sd.run().await
 }
+
+// Battery monitoring disabled — SAADC conflicts with SoftDevice BLE.
+// TODO: debug with SWD probe. The SAADC peripheral or P0.14/P0.31 pins
+// may conflict with the SoftDevice's radio or memory protection.
 
 struct Leds<'d> {
     red: Output<'d>,
@@ -101,6 +107,12 @@ async fn main(spawner: Spawner) {
     config.gpiote_interrupt_priority = Priority::P2;
     config.time_interrupt_priority = Priority::P2;
     let p = embassy_nrf::init(config);
+
+    // Set battery charging to 50 mA (P0.13 HIGH = low current on BQ25101)
+    let _charge_current = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
+
+    // Battery monitoring (P0.14 + P0.31 SAADC) disabled for now —
+    // SAADC interferes with SoftDevice BLE advertising. Needs SWD debugging.
 
     let mut leds = Leds {
         red: Output::new(p.P0_26, Level::High, OutputDrive::Standard),
@@ -163,6 +175,8 @@ async fn main(spawner: Spawner) {
 
     let server = unwrap!(Server::new(sd));
     unwrap!(spawner.spawn(softdevice_task(sd)));
+
+    // Battery monitoring disabled — see comment at top of main
 
     // Yellow = IMU init
     leds.set(true, true, false);

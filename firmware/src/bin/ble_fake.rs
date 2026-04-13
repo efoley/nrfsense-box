@@ -19,7 +19,7 @@ use nrf_softdevice::ble::advertisement_builder::{
 use nrf_softdevice::ble::{gatt_server, peripheral};
 use nrf_softdevice::{raw, Softdevice};
 
-use boxing_bag_protocol::{AccelPacket, AccelSample, SAMPLES_PER_PACKET, SENSOR_NAMES, SERVICE_UUID};
+use boxing_bag_protocol::{ImuPacket, ImuSample, PACKET_SIZE, SAMPLES_PER_PACKET, SENSOR_NAMES, SERVICE_UUID};
 
 use defmt_rtt as _;
 
@@ -168,20 +168,22 @@ async fn fake_stream(server: &Server, conn: &nrf_softdevice::ble::Connection) {
         };
         last_time = Some(now);
 
-        let samples = [
-            AccelSample { x: counter, y: counter.wrapping_add(1), z: counter.wrapping_add(2) },
-            AccelSample { x: counter.wrapping_add(3), y: counter.wrapping_add(4), z: counter.wrapping_add(5) },
-            AccelSample { x: counter.wrapping_add(6), y: counter.wrapping_add(7), z: counter.wrapping_add(8) },
-        ];
-        counter = counter.wrapping_add(9);
+        let samples = [ImuSample {
+            ax: counter, ay: counter.wrapping_add(1), az: counter.wrapping_add(2),
+            gx: counter.wrapping_add(3), gy: counter.wrapping_add(4), gz: counter.wrapping_add(5),
+        }];
+        counter = counter.wrapping_add(6);
 
-        let packet = AccelPacket {
+        let packet = ImuPacket {
             sensor_id: SENSOR_ID,
             sequence: seq,
             time_delta_ms: delta_ms,
             samples,
         };
         seq = seq.wrapping_add(1);
-        let _ = server.accel.accel_data_notify(conn, &packet.encode());
+        let encoded = packet.encode();
+        let mut padded = [0u8; 20];
+        padded[..encoded.len()].copy_from_slice(&encoded);
+        let _ = server.accel.accel_data_notify(conn, &padded);
     }
 }
