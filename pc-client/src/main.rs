@@ -1,6 +1,6 @@
 //! Boxing Bag PC Client
 //!
-//! Scans for BAG_TOP/BAG_MID/BAG_BOT BLE sensors, connects to all found,
+//! Scans for BAG_HI/BAG_LO BLE sensors, connects to all found,
 //! subscribes to accelerometer notifications, and displays a live terminal
 //! dashboard while logging data to CSV.
 //!
@@ -298,7 +298,7 @@ fn draw_dashboard(frame: &mut Frame, state: &HashMap<u8, SensorState>) {
     }
 
     // Footer
-    let footer = Paragraph::new(" CSV logging active | Data: 104 Hz × 3 sensors ")
+    let footer = Paragraph::new(" CSV logging active | Data: 104 Hz × 2 sensors ")
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
     frame.render_widget(footer, chunks[2]);

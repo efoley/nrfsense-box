@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-BLE-based accelerometer streaming system: 3× Seeed XIAO nRF52840 Sense boards
-attached to a boxing heavy bag stream LSM6DS3TR-C IMU data at 104 Hz to a Rust
-PC client that displays a live terminal dashboard and logs CSV.
+BLE-based IMU streaming system: 2× Seeed XIAO nRF52840 Sense boards
+attached to a boxing heavy bag stream LSM6DS3TR-C accel + gyro data at 104 Hz
+to a Rust PC client that displays a live terminal dashboard and logs CSV.
 
 ## Repository Structure
 
@@ -78,19 +78,21 @@ Both use the same register map for accelerometer reads.
 ## BLE Protocol
 
 - Service UUID: `b0b0ba90-0001-4000-8000-000000000000`
-- Accel characteristic UUID: `b0b0ba90-0002-4000-8000-000000000000`
-- Notification payload: 20 bytes (fits default ATT MTU of 23 - 3 overhead)
+- IMU characteristic UUID: `b0b0ba90-0002-4000-8000-000000000000`
+- Notification payload: 20 bytes (14 bytes data + 6 padding, fits default ATT MTU)
 
 ```
-Byte 0:    sensor_id (0=TOP, 1=MID, 2=BOT)
-Byte 1:    sequence (wrapping u8, for drop detection)
-Bytes 2-7: sample 0 — x_i16_le, y_i16_le, z_i16_le
-Bytes 8-13: sample 1
-Bytes 14-19: sample 2
+Byte 0:        sequence (wrapping u8)
+Byte 1:        bits[7:6] = sensor_id (0=HI, 1=LO)
+               bits[5:0] = time_delta_ms (0-63, saturating)
+Bytes 2-13:    1 × ImuSample:
+                 accel x/y/z as i16 LE (6 bytes)
+                 gyro  x/y/z as i16 LE (6 bytes)
+Bytes 14-19:   padding (zeros)
 ```
 
-3 samples × 6 bytes + 2 header = 20 bytes per notification.
-At 104 Hz ODR → ~35 notifications/sec per sensor.
+1 sample × 12 bytes + 2 header = 14 bytes per notification (padded to 20).
+At 104 Hz ODR → 104 notifications/sec per sensor.
 
 ## Key Architecture Decisions
 
@@ -115,7 +117,7 @@ At 104 Hz ODR → ~35 notifications/sec per sensor.
 Each XIAO gets a unique `SENSOR_ID` constant in `firmware/src/main.rs`:
 
 ```rust
-const SENSOR_ID: u8 = 0;  // 0=BAG_TOP, 1=BAG_MID, 2=BAG_BOT
+const SENSOR_ID: u8 = 0;  // 0=BAG_HI, 1=BAG_LO
 ```
 
 This is the ONLY change needed between boards. It sets the BLE advertisement

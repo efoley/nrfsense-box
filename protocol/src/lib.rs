@@ -120,7 +120,7 @@ impl ImuPacket {
 }
 
 /// Sensor names for BLE advertisement
-pub const SENSOR_NAMES: [&str; 3] = ["BAG_TOP", "BAG_MID", "BAG_BOT"];
+pub const SENSOR_NAMES: [&str; 2] = ["BAG_HI", "BAG_LO"];
 
 // ── Helper ─────────────────────────────────────────────────────────────
 const fn hex_uuid(s: &str) -> [u8; 16] {
