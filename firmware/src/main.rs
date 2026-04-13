@@ -23,7 +23,7 @@ use defmt::{info, warn, unwrap};
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::interrupt::Priority;
-// use embassy_nrf::saadc::{self, ChannelConfig, Saadc}; // disabled: SAADC breaks BLE
+use embassy_nrf::saadc::{self, ChannelConfig, Saadc};
 use embassy_nrf::twim::{self, Twim};
 use embassy_nrf::{bind_interrupts, peripherals};
 use embassy_time::{Duration, Ticker, Timer};
@@ -64,7 +64,7 @@ const SENSOR_ID: u8 = 0;
 
 bind_interrupts!(struct Irqs {
     TWISPI0 => twim::InterruptHandler<peripherals::TWISPI0>;
-    // SAADC => saadc::InterruptHandler; // disabled: SAADC breaks BLE
+    SAADC => saadc::InterruptHandler;
 });
 
 #[nrf_softdevice::gatt_service(uuid = "b0b0ba90-0001-4000-8000-000000000000")]
@@ -83,9 +83,46 @@ async fn softdevice_task(sd: &'static Softdevice) -> ! {
     sd.run().await
 }
 
-// Battery monitoring disabled — SAADC conflicts with SoftDevice BLE.
-// TODO: debug with SWD probe. The SAADC peripheral or P0.14/P0.31 pins
-// may conflict with the SoftDevice's radio or memory protection.
+const VBAT_LOW_MV: u32 = 3100;
+const VBAT_CUTOFF_MV: u32 = 3000;
+
+#[embassy_executor::task]
+async fn battery_monitor_task(mut saadc: Saadc<'static, 1>, mut vbat_enable: Output<'static>) {
+    Timer::after_secs(5).await;
+
+    let mut consecutive_low = 0u8;
+
+    loop {
+        vbat_enable.set_low();
+        Timer::after_millis(5).await;
+        let mut buf = [0i16; 1];
+        saadc.sample(&mut buf).await;
+        vbat_enable.set_high();
+
+        let raw = buf[0].max(0) as u32;
+        let vbat_mv = raw * 7200 / 4095;
+
+        info!("Battery: {} mV (raw={})", vbat_mv, raw);
+
+        if vbat_mv < VBAT_CUTOFF_MV && vbat_mv > 1000 {
+            // Ignore readings below 1V — no battery connected (USB only)
+            consecutive_low += 1;
+            warn!("Battery critically low: {} mV ({}/3)", vbat_mv, consecutive_low);
+            if consecutive_low >= 3 {
+                warn!("Battery cutoff! Entering system OFF.");
+                unsafe {
+                    let power_systemoff = 0x4000_0500 as *mut u32;
+                    power_systemoff.write_volatile(1);
+                }
+                loop { cortex_m::asm::wfi(); }
+            }
+        } else {
+            consecutive_low = 0;
+        }
+
+        Timer::after_secs(10).await;
+    }
+}
 
 struct Leds<'d> {
     red: Output<'d>,
@@ -111,8 +148,8 @@ async fn main(spawner: Spawner) {
     // Set battery charging to 50 mA (P0.13 HIGH = low current on BQ25101)
     let _charge_current = Output::new(p.P0_13, Level::High, OutputDrive::Standard);
 
-    // Battery monitoring (P0.14 + P0.31 SAADC) disabled for now —
-    // SAADC interferes with SoftDevice BLE advertising. Needs SWD debugging.
+    // Battery voltage divider: P0.14 LOW = on, HIGH = off.
+    // Toggled by battery_monitor_task — only enabled during sampling.
 
     let mut leds = Leds {
         red: Output::new(p.P0_26, Level::High, OutputDrive::Standard),
@@ -176,7 +213,14 @@ async fn main(spawner: Spawner) {
     let server = unwrap!(Server::new(sd));
     unwrap!(spawner.spawn(softdevice_task(sd)));
 
-    // Battery monitoring disabled — see comment at top of main
+    // Set up battery ADC after SoftDevice (SAADC interrupt needs priority P2)
+    use embassy_nrf::interrupt::{self, InterruptExt};
+    let saadc_config = saadc::Config::default();
+    let channel = ChannelConfig::single_ended(p.P0_31);
+    let saadc = Saadc::new(p.SAADC, Irqs, saadc_config, [channel]);
+    interrupt::SAADC.set_priority(Priority::P2);
+    let vbat_enable = Output::new(p.P0_14, Level::High, OutputDrive::Standard);
+    unwrap!(spawner.spawn(battery_monitor_task(saadc, vbat_enable)));
 
     // Yellow = IMU init
     leds.set(true, true, false);
