@@ -27,10 +27,10 @@ pub const SAMPLE_SIZE: usize = 12; // 6 accel + 6 gyro
 pub const PACKET_SIZE: usize = 2 + SAMPLES_PER_PACKET * SAMPLE_SIZE; // 14
 pub const MAX_TIME_DELTA_MS: u8 = 63;
 
-/// Accelerometer scale: ±4g → 0.122 mg/LSB
-pub const ACCEL_SCALE: f32 = 0.000122;
-/// Gyroscope scale: ±250 dps → 8.75 mdps/LSB
-pub const GYRO_SCALE: f32 = 0.00875;
+/// Accelerometer scale: ±16g → 0.488 mg/LSB
+pub const ACCEL_SCALE: f32 = 0.000488;
+/// Gyroscope scale: ±2000 dps → 70 mdps/LSB
+pub const GYRO_SCALE: f32 = 0.070;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ImuSample {

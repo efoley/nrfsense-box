@@ -105,12 +105,18 @@ At 104 Hz ODR → 104 notifications/sec per sensor.
   Protocol is a path dependency from both. Don't add a root workspace.
 - **Default ATT MTU (23)** — avoids MTU negotiation complexity. 3 samples/packet is
   the max that fits. If MTU negotiation is added later, increase `SAMPLES_PER_PACKET`.
-- **±4g accelerometer range** — `CTRL1_XL = 0x48`. Change to `0x4C` for ±8g or `0x44`
-  for ±2g. Update `AccelSample::to_g()` scale factor if range changes:
-  - ±2g: 0.000061
-  - ±4g: 0.000122
-  - ±8g: 0.000244
-  - ±16g: 0.000488
+- **±16g accelerometer range** — `CTRL1_XL = 0x44`. Max range to avoid clipping on
+  impacts. Scale factor 0.488 mg/LSB. Other options:
+  - ±2g: `CTRL1_XL = 0x40`, scale 0.000061
+  - ±4g: `CTRL1_XL = 0x48`, scale 0.000122
+  - ±8g: `CTRL1_XL = 0x4C`, scale 0.000244
+  - ±16g: `CTRL1_XL = 0x44`, scale 0.000488
+- **±2000 dps gyroscope range** — `CTRL2_G = 0x4C`. Max range to avoid clipping.
+  Scale factor 70 mdps/LSB. Other options:
+  - ±250 dps: `CTRL2_G = 0x40`, scale 0.00875
+  - ±500 dps: `CTRL2_G = 0x44`, scale 0.01750
+  - ±1000 dps: `CTRL2_G = 0x48`, scale 0.03500
+  - ±2000 dps: `CTRL2_G = 0x4C`, scale 0.07000
 
 ## Per-Board Configuration
 

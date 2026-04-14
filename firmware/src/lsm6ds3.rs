@@ -38,17 +38,17 @@ impl<'d, T: twim::Instance> Lsm6ds3<'d, T> {
         self.twim.write(ADDR, &[CTRL3_C, 0x01]).await?;
         embassy_time::Timer::after_millis(20).await;
 
-        // Accelerometer: 104 Hz, ±4g
-        // CTRL1_XL = 0b0100_10_00 = 0x48
-        //   ODR[7:4]=0100 (104Hz), FS[3:2]=10 (±4g), BW=00 (400Hz AA)
-        self.twim.write(ADDR, &[CTRL1_XL, 0x48]).await?;
+        // Accelerometer: 104 Hz, ±16g (max range to avoid clipping on impacts)
+        // CTRL1_XL = 0b0100_01_00 = 0x44
+        //   ODR[7:4]=0100 (104Hz), FS[3:2]=01 (±16g), BW=00 (400Hz AA)
+        self.twim.write(ADDR, &[CTRL1_XL, 0x44]).await?;
 
-        // Gyroscope: 104 Hz, ±250 dps
-        // CTRL2_G = 0b0100_00_0_0 = 0x40
-        //   ODR[7:4]=0100 (104Hz), FS[3:2]=00 (±250 dps)
-        self.twim.write(ADDR, &[CTRL2_G, 0x40]).await?;
+        // Gyroscope: 104 Hz, ±2000 dps (max range to avoid clipping on impacts)
+        // CTRL2_G = 0b0100_11_0_0 = 0x4C
+        //   ODR[7:4]=0100 (104Hz), FS[3:2]=11 (±2000 dps)
+        self.twim.write(ADDR, &[CTRL2_G, 0x4C]).await?;
 
-        defmt::info!("LSM6DS3 initialized: 104 Hz, ±4g accel, ±250 dps gyro");
+        defmt::info!("LSM6DS3 initialized: 104 Hz, ±16g accel, ±2000 dps gyro");
         Ok(())
     }
 
